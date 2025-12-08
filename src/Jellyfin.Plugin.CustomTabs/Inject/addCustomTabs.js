@@ -1,7 +1,7 @@
 // ============================================================================
 // Custom Tabs Plugin - Complete Hybrid Layout Support
 // Original author: Iamparadox (basic tab button creation for legacy layout)
-// Extended by: LLM comment (hybrid layout support, content panels, styling fixes)
+// Extended by: soultaco83(AI assistance) (hybrid layout support, content panels, styling fixes)
 // ============================================================================
 // This plugin handles both tab buttons AND content display for Jellyfin custom tabs
 // Supports three layout types: Modern (MUI Tabs), Hybrid (MUI Buttons), Legacy (Emby)
