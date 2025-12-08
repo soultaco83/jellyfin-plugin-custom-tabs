@@ -69,18 +69,6 @@ jobs:
         fi
         echo "Release tag: ${{ env.RELEASE_TAG }}"
 
-    - name: Update Directory.Build.props
-      run: |
-        version="${RELEASE_TAG#v}"
-        sed -i 's/<Version>.*<\/Version>/<Version>'"$version"'<\/Version>/' Directory.Build.props
-        sed -i 's/<AssemblyVersion>.*<\/AssemblyVersion>/<AssemblyVersion>'"$version"'<\/AssemblyVersion>/' Directory.Build.props
-        sed -i 's/<FileVersion>.*<\/FileVersion>/<FileVersion>'"$version"'<\/FileVersion>/' Directory.Build.props
-        git config user.name github-actions
-        git config user.email github-actions@github.com
-        git add Directory.Build.props
-        git commit -m "Update version to $version in Directory.Build.props"
-        git push
-
     - name: Get previous release notes
       id: previous_release
       run: |
@@ -120,24 +108,6 @@ jobs:
       run: |
         checksum=$(md5sum Jellyfin.Plugin.CustomTabs.zip | awk '{ print $1 }')
         echo "MD5=$checksum" >> $GITHUB_ENV
-
-    - name: Update manifest.json
-      run: |
-        version="${RELEASE_TAG#v}"
-        timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-        jq --arg version "$version" \
-           --arg changelog "$RELEASE_NOTES" \
-           --arg sourceUrl "https://github.com/${{ github.repository }}/releases/download/$RELEASE_TAG/Jellyfin.Plugin.CustomTabs.zip" \
-           --arg checksum "$MD5" \
-           --arg timestamp "$timestamp" \
-        '.[0].versions += [{
-          "version": $version,
-          "changelog": $changelog,
-          "targetAbi": "10.9.0.0",
-          "sourceUrl": $sourceUrl,
-          "checksum": $checksum,
-          "timestamp": $timestamp
-        }]' manifest.json > manifest_updated.json && mv manifest_updated.json manifest.json
 
     - name: Commit and push updated manifest
       run: |
