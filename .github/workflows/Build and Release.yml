@@ -6,6 +6,10 @@ on:
       - 'v*'
   workflow_dispatch:
     inputs:
+      branch:
+        description: 'Branch to build from'
+        required: false
+        default: 'main'  # or your default branch name
       manual_tag:
         description: 'Manually set release tag (leave empty for auto-increment)'
         required: false
@@ -18,8 +22,9 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v6
       with:
+        ref: ${{ github.event.inputs.branch || github.ref }}
         fetch-depth: 0  # Fetch all history
         persist-credentials: true  # Ensure credentials are persisted
         clean: true  # Ensure working directory is clean
