@@ -105,12 +105,9 @@ jobs:
 
     - name: Restore dependencies
       run: dotnet restore src/Jellyfin.Plugin.CustomTabs/Jellyfin.Plugin.CustomTabs.csproj
-
-    - name: Build
-      run: dotnet build src/Jellyfin.Plugin.CustomTabs/Jellyfin.Plugin.CustomTabs.csproj --configuration Release --no-restore
       
     - name: Publish
-      run: dotnet publish src/Jellyfin.Plugin.CustomTabs/Jellyfin.Plugin.CustomTabs.csproj --configuration Release --output ./publish
+      run: dotnet publish src/Jellyfin.Plugin.CustomTabs/Jellyfin.Plugin.CustomTabs.csproj --configuration Release --no-restore --output ./publish
 
     - name: Zip artifact
       run: |
