@@ -1,0 +1,168 @@
+name: Build and Release Jellyfin Plugin
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      manual_tag:
+        description: 'Manually set release tag (leave empty for auto-increment)'
+        required: false
+      release_notes:
+        description: 'Custom release notes (leave empty to use previous release notes)'
+        required: false
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+      with:
+        fetch-depth: 0  # Fetch all history
+        persist-credentials: true  # Ensure credentials are persisted
+        clean: true  # Ensure working directory is clean
+    
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v5
+      with:
+        dotnet-version: '9.0.x'  # Use .NET 9
+        
+    - name: Determine release tag
+      id: determine_tag
+      run: |
+        if [ -n "${{ github.event.inputs.manual_tag }}" ]; then
+          echo "RELEASE_TAG=${{ github.event.inputs.manual_tag }}" >> $GITHUB_ENV
+        elif [[ $GITHUB_REF == refs/tags/* ]]; then
+          echo "RELEASE_TAG=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+        else
+          # Get all tags and sort them by version number
+          latest_tag=$(git tag -l "v*" | sort -V | tail -n1 || echo "v0.0.0")
+          IFS='.' read -r major minor patch <<< "${latest_tag#v}"
+          new_patch=$((patch + 1))
+          new_tag="v$major.$minor.$new_patch"
+          
+          # Check if the new tag already exists
+          if git rev-parse "$new_tag" >/dev/null 2>&1; then
+            echo "Tag $new_tag already exists, incrementing..."
+            while git rev-parse "$new_tag" >/dev/null 2>&1; do
+              patch=$((patch + 1))
+              new_tag="v$major.$minor.$patch"
+            done
+          fi
+          
+          echo "RELEASE_TAG=$new_tag" >> $GITHUB_ENV
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git tag $new_tag
+          git push origin $new_tag || {
+            echo "Failed to push tag $new_tag, retrying with fetch first..."
+            git fetch --tags
+            git push origin $new_tag
+          }
+        fi
+        echo "Release tag: ${{ env.RELEASE_TAG }}"
+
+    - name: Update Directory.Build.props
+      run: |
+        version="${RELEASE_TAG#v}"
+        sed -i 's/<Version>.*<\/Version>/<Version>'"$version"'<\/Version>/' Directory.Build.props
+        sed -i 's/<AssemblyVersion>.*<\/AssemblyVersion>/<AssemblyVersion>'"$version"'<\/AssemblyVersion>/' Directory.Build.props
+        sed -i 's/<FileVersion>.*<\/FileVersion>/<FileVersion>'"$version"'<\/FileVersion>/' Directory.Build.props
+        git config user.name github-actions
+        git config user.email github-actions@github.com
+        git add Directory.Build.props
+        git commit -m "Update version to $version in Directory.Build.props"
+        git push
+
+    - name: Get previous release notes
+      id: previous_release
+      run: |
+        prev_release=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+          "https://api.github.com/repos/${{ github.repository }}/releases/latest")
+        echo "PREVIOUS_NOTES<<EOF" >> $GITHUB_ENV
+        echo "$prev_release" | jq -r .body >> $GITHUB_ENV
+        echo "EOF" >> $GITHUB_ENV
+
+    - name: Determine release notes
+      id: release_notes
+      run: |
+        if [ -n "${{ github.event.inputs.release_notes }}" ]; then
+          echo "RELEASE_NOTES<<EOF" >> $GITHUB_ENV
+          echo "${{ github.event.inputs.release_notes }}" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+        else
+          echo "RELEASE_NOTES<<EOF" >> $GITHUB_ENV
+          echo "${{ env.PREVIOUS_NOTES }}" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+        fi
+
+    - name: Restore dependencies
+      run: dotnet restore
+
+    - name: Build
+      run: dotnet build --configuration Release --no-restore
+      
+    - name: Publish
+      run: dotnet publish --configuration Release --output ./publish
+
+    - name: Zip artifact
+      run: |
+        cd ./publish
+        zip Jellyfin.Plugin.CustomTabs.zip Jellyfin.Plugin.CustomTabs.dll
+        mv Jellyfin.Plugin.CustomTabs.zip ../
+
+    - name: Calculate MD5
+      id: md5
+      run: |
+        checksum=$(md5sum Jellyfin.Plugin.CustomTabs.zip | awk '{ print $1 }')
+        echo "MD5=$checksum" >> $GITHUB_ENV
+
+    - name: Update manifest.json
+      run: |
+        version="${RELEASE_TAG#v}"
+        timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+        jq --arg version "$version" \
+           --arg changelog "$RELEASE_NOTES" \
+           --arg sourceUrl "https://github.com/${{ github.repository }}/releases/download/$RELEASE_TAG/Jellyfin.Plugin.CustomTabs.zip" \
+           --arg checksum "$MD5" \
+           --arg timestamp "$timestamp" \
+        '.[0].versions += [{
+          "version": $version,
+          "changelog": $changelog,
+          "targetAbi": "10.9.0.0",
+          "sourceUrl": $sourceUrl,
+          "checksum": $checksum,
+          "timestamp": $timestamp
+        }]' manifest.json > manifest_updated.json && mv manifest_updated.json manifest.json
+
+    - name: Commit and push updated manifest
+      run: |
+        git config user.name github-actions
+        git config user.email github-actions@github.com
+        git add manifest.json
+        git commit -m "Update manifest.json for version $RELEASE_TAG"
+        git push
+
+    - name: Create Release
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ env.RELEASE_TAG }}
+        release_name: Release ${{ env.RELEASE_TAG }}
+        body: ${{ env.RELEASE_NOTES }}
+        draft: false
+        prerelease: false
+        
+    - name: Upload Release Asset
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: ./Jellyfin.Plugin.CustomTabs.zip
+        asset_name: Jellyfin.Plugin.CustomTabs.zip
+        asset_content_type: application/zip
