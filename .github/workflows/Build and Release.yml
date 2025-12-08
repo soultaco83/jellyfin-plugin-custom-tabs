@@ -109,14 +109,6 @@ jobs:
         checksum=$(md5sum Jellyfin.Plugin.CustomTabs.zip | awk '{ print $1 }')
         echo "MD5=$checksum" >> $GITHUB_ENV
 
-    - name: Commit and push updated manifest
-      run: |
-        git config user.name github-actions
-        git config user.email github-actions@github.com
-        git add manifest.json
-        git commit -m "Update manifest.json for version $RELEASE_TAG"
-        git push
-
     - name: Create Release
       id: create_release
       uses: actions/create-release@v1
