@@ -1,10 +1,11 @@
-// Updated Custom Tabs Plugin - Supports both Legacy and Modern (Experimental) layouts
+// Updated Custom Tabs Plugin - Handles Jellyfin 10.12.0 Hybrid Layout
+// The new "modern" layout uses MUI Button links in the toolbar, not MuiTabs
 if (typeof window.customTabsPlugin == 'undefined') {
 
     window.customTabsPlugin = {
         initialized: false,
         currentPage: null,
-        currentLayout: null, // 'legacy' or 'modern'
+        currentLayout: null, // 'legacy', 'hybrid', or 'modern'
 
         init: function() {
             console.log('CustomTabs: Initializing plugin');
@@ -14,17 +15,22 @@ if (typeof window.customTabsPlugin == 'undefined') {
 
         // Detect which layout is being used
         detectLayout: function() {
-            // Check for Material-UI AppBar (modern/experimental layout)
-            const hasMuiAppBar = !!document.querySelector('.MuiAppBar-root, [class*="MuiAppBar"]');
-            const hasMuiTabs = !!document.querySelector('.MuiTabs-root, [class*="MuiTabs"]');
-            
-            // Check for old emby tabs
+            // Check for different tab implementations
+            const hasMuiAppBar = !!document.querySelector('.MuiAppBar-root');
+            const hasMuiTabs = !!document.querySelector('.MuiTabs-root');
+            const hasToolbarButtons = document.querySelectorAll('.MuiToolbar-root .MuiButton-root[href*="#/home"]').length > 0;
             const hasEmbyTabs = !!document.querySelector('.emby-tabs-slider');
             
-            if (hasMuiAppBar || hasMuiTabs) {
+            if (hasMuiTabs) {
+                // True modern layout with MUI Tabs component
                 this.currentLayout = 'modern';
-                console.log('CustomTabs: Detected Modern/Experimental layout');
+                console.log('CustomTabs: Detected Modern layout (MUI Tabs)');
+            } else if (hasMuiAppBar && hasToolbarButtons) {
+                // Hybrid layout: MUI AppBar with Button links as tabs
+                this.currentLayout = 'hybrid';
+                console.log('CustomTabs: Detected Hybrid layout (MUI Buttons as tabs)');
             } else if (hasEmbyTabs) {
+                // Pure legacy layout
                 this.currentLayout = 'legacy';
                 console.log('CustomTabs: Detected Legacy layout');
             } else {
@@ -44,18 +50,25 @@ if (typeof window.customTabsPlugin == 'undefined') {
             this.detectLayout();
 
             if (typeof ApiClient !== 'undefined') {
-                if (this.currentLayout === 'modern') {
-                    // For modern layout, check for MUI components
-                    const muiAppBar = document.querySelector('.MuiAppBar-root, [class*="MuiAppBar"]');
-                    const muiTabs = document.querySelector('.MuiTabs-root, [class*="MuiTabs"]');
+                if (this.currentLayout === 'hybrid') {
+                    // Check for MUI Toolbar with button links
+                    const toolbar = document.querySelector('.MuiToolbar-root');
+                    const hasButtons = toolbar && toolbar.querySelectorAll('.MuiButton-root[href*="#/home"]').length > 0;
                     
-                    if (muiAppBar || muiTabs) {
+                    if (hasButtons) {
+                        console.debug('CustomTabs: Hybrid layout UI ready, creating tabs');
+                        this.createCustomTabs();
+                        return;
+                    }
+                } else if (this.currentLayout === 'modern') {
+                    // Check for MUI Tabs
+                    if (document.querySelector('.MuiTabs-root')) {
                         console.debug('CustomTabs: Modern layout UI ready, creating tabs');
                         this.createCustomTabs();
                         return;
                     }
                 } else if (this.currentLayout === 'legacy') {
-                    // For legacy layout, check for emby tabs
+                    // Check for emby tabs
                     if (document.querySelector('.emby-tabs-slider')) {
                         console.debug('CustomTabs: Legacy layout UI ready, creating tabs');
                         this.createCustomTabs();
@@ -71,7 +84,9 @@ if (typeof window.customTabsPlugin == 'undefined') {
         createCustomTabs: function() {
             console.debug('CustomTabs: Starting tab creation process');
 
-            if (this.currentLayout === 'modern') {
+            if (this.currentLayout === 'hybrid') {
+                this.createHybridTabs();
+            } else if (this.currentLayout === 'modern') {
                 this.createModernTabs();
             } else if (this.currentLayout === 'legacy') {
                 this.createLegacyTabs();
@@ -80,11 +95,89 @@ if (typeof window.customTabsPlugin == 'undefined') {
             }
         },
 
-        // Create tabs for the modern/experimental layout
+        // Create tabs for hybrid layout (MUI Button links in toolbar)
+        createHybridTabs: function() {
+            console.log('CustomTabs: Creating tabs for Hybrid layout');
+
+            // Find the container for tab buttons
+            // They're usually in a MuiStack within the MuiToolbar
+            const toolbar = document.querySelector('.MuiToolbar-root');
+            if (!toolbar) {
+                console.error('CustomTabs: Could not find MuiToolbar');
+                return;
+            }
+
+            // Find the stack/container that holds the Home and Favorites buttons
+            const buttonContainer = toolbar.querySelector('.MuiStack-root') || 
+                                  toolbar.querySelector('div:has(> .MuiButton-root[href*="#/home"])') ||
+                                  toolbar;
+
+            if (!buttonContainer) {
+                console.error('CustomTabs: Could not find button container in toolbar');
+                return;
+            }
+
+            // Check if custom tabs already exist
+            if (buttonContainer.querySelector('[id^="customTabButton_"]')) {
+                console.debug('CustomTabs: Custom tabs already exist, skipping creation');
+                return;
+            }
+
+            // Fetch tab configuration
+            ApiClient.fetch({
+                url: ApiClient.getUrl('CustomTabs/Config'),
+                type: 'GET',
+                dataType: 'json',
+                headers: {
+                    accept: 'application/json'
+                }
+            }).then((configs) => {
+                console.debug('CustomTabs: Retrieved config for', configs.length, 'tabs');
+
+                // Get the next tab index (count existing home tabs)
+                const existingTabs = buttonContainer.querySelectorAll('.MuiButton-root[href*="#/home"]');
+                let nextTabIndex = existingTabs.length;
+
+                configs.forEach((config, i) => {
+                    const customTabId = `customTabButton_${i}`;
+
+                    if (document.querySelector(`#${customTabId}`)) {
+                        console.debug(`CustomTabs: Tab ${customTabId} already exists, skipping`);
+                        return;
+                    }
+
+                    console.log("CustomTabs: Creating custom tab:", config.Title);
+
+                    // Create MUI Button link (matching Jellyfin's structure)
+                    const button = document.createElement("a");
+                    button.className = "MuiButtonBase-root MuiButton-root MuiButton-text MuiButton-textInherit MuiButton-sizeMedium MuiButton-textSizeMedium MuiButton-colorInherit css-1f20jcn";
+                    button.setAttribute("tabindex", "0");
+                    button.setAttribute("href", `#/home?tab=${nextTabIndex + i}`);
+                    button.setAttribute("id", customTabId);
+
+                    // Add button text
+                    button.textContent = config.Title;
+
+                    // Add ripple effect container (for MUI)
+                    const ripple = document.createElement("span");
+                    ripple.className = "MuiTouchRipple-root css-4mb1j7";
+                    button.appendChild(ripple);
+
+                    // Append to container
+                    buttonContainer.appendChild(button);
+                    console.log(`CustomTabs: Added hybrid tab ${customTabId}`);
+                });
+
+                console.log('CustomTabs: All custom tabs created successfully (Hybrid layout)');
+            }).catch((error) => {
+                console.error('CustomTabs: Error fetching tab configs:', error);
+            });
+        },
+
+        // Create tabs for true modern layout (MUI Tabs component)
         createModernTabs: function() {
             console.log('CustomTabs: Creating tabs for Modern layout');
 
-            // Find the MUI Tabs container
             const muiTabsRoot = document.querySelector('.MuiTabs-root [role="tablist"], .MuiTabs-scroller');
             
             if (!muiTabsRoot) {
@@ -92,13 +185,11 @@ if (typeof window.customTabsPlugin == 'undefined') {
                 return;
             }
 
-            // Check if custom tabs already exist
             if (muiTabsRoot.querySelector('[id^="customTabButton_"]')) {
                 console.debug('CustomTabs: Custom tabs already exist, skipping creation');
                 return;
             }
 
-            // Fetch tab configuration
             ApiClient.fetch({
                 url: ApiClient.getUrl('CustomTabs/Config'),
                 type: 'GET',
@@ -119,7 +210,6 @@ if (typeof window.customTabsPlugin == 'undefined') {
 
                     console.log("CustomTabs: Creating custom tab:", config.Title);
 
-                    // Create MUI-style tab button
                     const button = document.createElement("button");
                     button.type = "button";
                     button.classList.add("MuiButtonBase-root", "MuiTab-root");
@@ -129,18 +219,15 @@ if (typeof window.customTabsPlugin == 'undefined') {
                     button.setAttribute("id", customTabId);
                     button.setAttribute("data-index", i + 2);
                     
-                    // Tab label
                     const label = document.createElement("span");
                     label.classList.add("MuiTab-label");
                     label.textContent = config.Title;
                     button.appendChild(label);
 
-                    // Tab indicator (underline)
                     const indicator = document.createElement("span");
                     indicator.classList.add("MuiTouchRipple-root");
                     button.appendChild(indicator);
 
-                    // Add click handler
                     button.addEventListener('click', () => {
                         this.switchToCustomTab(i, 'modern');
                     });
@@ -155,7 +242,7 @@ if (typeof window.customTabsPlugin == 'undefined') {
             });
         },
 
-        // Create tabs for the legacy layout (your original code)
+        // Create tabs for legacy layout
         createLegacyTabs: function() {
             console.log('CustomTabs: Creating tabs for Legacy layout');
 
@@ -222,7 +309,6 @@ if (typeof window.customTabsPlugin == 'undefined') {
         switchToCustomTab: function(index, layout) {
             console.log(`CustomTabs: Switching to custom tab ${index}`);
             
-            // Update tab selection state
             const allTabs = document.querySelectorAll('[role="tab"]');
             allTabs.forEach(tab => {
                 tab.setAttribute('aria-selected', 'false');
@@ -235,7 +321,6 @@ if (typeof window.customTabsPlugin == 'undefined') {
                 selectedTab.classList.add('Mui-selected');
             }
 
-            // Show the corresponding tab panel
             const tabPanels = document.querySelectorAll('[role="tabpanel"], .tabContent');
             tabPanels.forEach(panel => {
                 panel.style.display = 'none';
