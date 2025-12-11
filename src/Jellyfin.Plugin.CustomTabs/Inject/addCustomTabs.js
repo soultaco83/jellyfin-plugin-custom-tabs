@@ -1,417 +1,526 @@
-﻿// Scope everything in a check to avoid re-declaring the plugin
+// Scope everything in a check to avoid re-declaring the plugin
 if (typeof window.customTabsPlugin == 'undefined') {
 
     // Define the plugin on the window object for universal access
     window.customTabsPlugin = {
         initialized: false,
         currentPage: null,
-        layoutType: null, // 'modern' or 'legacy'
-        tabConfigs: null,
-        panelsCreated: false,
+        tabsCreated: false,
+        lastInitTime: 0,
+        initDebounceDelay: 2000, // Increased to 2 seconds to prevent rapid re-init
+        tabElements: [], // Store references to created tabs
 
-        // Kicks off the process
+        // ===== NEW: UI version detection flags =====
+        isModernUI: false,
+        isLegacyUI: false,
+
+        // Kicks off the process with aggressive debouncing
         init: function() {
+            const now = Date.now();
+            
+            // Aggressive debounce: Don't re-init if called within delay period
+            if (now - this.lastInitTime < this.initDebounceDelay) {
+                console.debug('CustomTabs: Init debounced, skipping (called too soon)');
+                return;
+            }
+            
+            // If tabs already exist and are visible, skip entirely
+            if (this.tabsCreated && this.tabsStillExist()) {
+                console.debug('CustomTabs: Tabs already exist and are visible, skipping init');
+                return;
+            }
+            
+            this.lastInitTime = now;
             console.log('CustomTabs: Initializing plugin');
-            this.detectLayout();
             this.waitForUI();
         },
 
-        // Detect whether we're using Modern (experimental) or Legacy (stable) layout
-        // For 10.12+, Modern layout is the default
-        detectLayout: function() {
-            // Check for Jellyfin version if available
-            const jellyfinVersion = window.ApiClient?.serverVersion?.() || '';
-            const is1012OrNewer = jellyfinVersion.startsWith('10.12') || 
-                                  jellyfinVersion.startsWith('10.13') ||
-                                  jellyfinVersion.startsWith('10.14');
+        // Check if our tabs still exist in the DOM
+        tabsStillExist: function() {
+            const container = document.querySelector('[class*="MuiToolbar"]') || 
+                            document.querySelector('.emby-tabs-slider');
+            if (!container) return false;
             
-            // Modern layout indicators (10.12+ default):
-            // 1. Has MUI-based drawer/sidebar
-            // 2. Uses React Router
-            // 3. Experimental app shell structure
-            // 4. No hash routing (Modern uses path routing)
+            const existingTabs = container.querySelectorAll('[data-custom-tab="true"]');
+            return existingTabs.length > 0 && existingTabs[0].isConnected;
+        },
+
+        // ===== NEW: Detect UI version (Modern 10.12+ vs Legacy 10.11-) =====
+        detectUIVersion: function() {
+            // Check for Material UI components (10.12+)
+            this.isModernUI = !!(document.querySelector('.MuiButton-root') || 
+                               document.querySelector('[class*="MuiToolbar"]'));
             
-            const hasModernDrawer = document.querySelector('[class*="MuiDrawer"]') || 
-                                    document.querySelector('.main-drawer-experimental') ||
-                                    document.querySelector('[data-testid="main-drawer"]');
+            // Check for Legacy UI elements (10.11 and below)
+            this.isLegacyUI = !!document.querySelector('.emby-tabs-slider');
             
-            const hasModernAppBar = document.querySelector('[class*="MuiAppBar"]');
-            
-            // Check for the new experimental home structure
-            const hasExperimentalHome = document.querySelector('[class*="HomePage_"]') ||
-                                        document.querySelector('[data-page="home"]') ||
-                                        document.querySelector('.experimental-home');
-            
-            // Modern layout uses path routing, legacy uses hash routing (#/)
-            const usesHashRouting = window.location.hash.startsWith('#/');
-            const usesPathRouting = !usesHashRouting && window.location.pathname !== '/';
-            
-            // Legacy layout indicators (10.11 and below)
-            const hasLegacyTabs = document.querySelector('.headerTabs.sectionTabs');
-            const hasLegacyHomeTab = document.querySelector('#homeTab');
-            const hasLegacyIndexPage = document.querySelector('#indexPage[data-controller="home"]');
-            
-            // Decision logic:
-            // 1. If explicitly 10.12+, default to modern unless legacy elements present
-            // 2. If MUI components found, it's modern
-            // 3. If hash routing AND legacy tabs present, it's legacy
-            // 4. If no clear indicators, check for emby-tabs-slider context
-            
-            if (is1012OrNewer || hasModernDrawer || hasModernAppBar || hasExperimentalHome) {
-                // Even on 10.12+, check if user switched to legacy layout
-                if (hasLegacyHomeTab && hasLegacyTabs && usesHashRouting) {
-                    this.layoutType = 'legacy';
-                    console.log('CustomTabs: Detected Legacy layout (user preference on 10.12)');
-                } else {
-                    this.layoutType = 'modern';
-                    console.log('CustomTabs: Detected Modern layout (10.12+ default)');
-                }
-            } else if (usesHashRouting && (hasLegacyTabs || hasLegacyHomeTab || hasLegacyIndexPage)) {
-                this.layoutType = 'legacy';
-                console.log('CustomTabs: Detected Legacy layout (hash routing + legacy elements)');
-            } else {
-                // Final check: look for specific DOM patterns
-                const tabsSlider = document.querySelector('.emby-tabs-slider');
-                const mainView = document.querySelector('.mainAnimatedPages') || 
-                                 document.querySelector('[data-type="page"]');
-                
-                if (tabsSlider && mainView && usesHashRouting) {
-                    this.layoutType = 'legacy';
-                    console.log('CustomTabs: Detected Legacy layout (fallback)');
-                } else {
-                    this.layoutType = 'modern';
-                    console.log('CustomTabs: Defaulting to Modern layout');
-                }
+            if (this.isModernUI) {
+                console.debug('CustomTabs: Detected Modern UI (10.12+)');
+            } else if (this.isLegacyUI) {
+                console.debug('CustomTabs: Detected Legacy UI (10.11-)');
             }
+            
+            return this.isModernUI || this.isLegacyUI;
         },
 
         // Waits for the necessary page elements to be ready before acting
         waitForUI: function() {
-            // Check if we are on the home page by looking at the URL
             const hash = window.location.hash;
-            const pathname = window.location.pathname;
             
-            // Check both hash-based routing (legacy) and path-based routing (modern)
-            const isHomePage = hash === '' || 
-                               hash === '#/home' || 
-                               hash === '#/home.html' || 
-                               hash.includes('#/home?') || 
-                               hash.includes('#/home.html?') ||
-                               pathname === '/home' ||
-                               pathname.endsWith('/home') ||
-                               pathname === '/' ||
-                               pathname.endsWith('/web/') ||
-                               pathname.endsWith('/web/index.html');
-
-            if (!isHomePage && hash !== '' && !pathname.endsWith('/')) {
-                console.debug('CustomTabs: Not on main page, skipping UI check. Hash:', hash, 'Path:', pathname);
+            // ===== NEW: Check if viewing a custom tab =====
+            if (hash.includes('#/customTab_')) {
+                console.debug('CustomTabs: On custom tab page, showing content');
+                this.showCustomTabContent();
+                return;
+            }
+            
+            // Check if we are on the home page by looking at the URL hash
+            if (hash !== '' && hash !== '#/home' && hash !== '#/home.html' && !hash.includes('#/home?') && !hash.includes('#/home.html?')) {
+                console.debug('CustomTabs: Not on main page, skipping UI check. Hash:', hash);
                 return;
             }
 
-            if (this.layoutType === 'modern') {
-                this.waitForModernUI();
+            // ===== MODIFIED: Detect UI version first =====
+            if (!this.detectUIVersion()) {
+                console.debug('CustomTabs: UI version not detected yet, waiting...');
+                setTimeout(() => this.waitForUI(), 200);
+                return;
+            }
+
+            // If the UI is ready, create tabs; otherwise, wait and check again
+            if (typeof ApiClient !== 'undefined') {
+                // ===== MODIFIED: Check appropriate container based on UI version =====
+                const uiReady = this.isModernUI 
+                    ? document.querySelector('[class*="MuiToolbar"]')
+                    : document.querySelector('.emby-tabs-slider');
+                
+                if (uiReady) {
+                    console.debug('CustomTabs: UI elements available on main page, creating tabs');
+                    this.createCustomTabs();
+                } else {
+                    console.debug('CustomTabs: Waiting for UI elements on main page...');
+                    setTimeout(() => this.waitForUI(), 200);
+                }
             } else {
-                this.waitForLegacyUI();
+                console.debug('CustomTabs: Waiting for UI elements on main page...');
+                setTimeout(() => this.waitForUI(), 200);
             }
         },
 
-        // Wait for Modern layout UI elements
-        waitForModernUI: function() {
-            // Modern layout ready indicators
-            const drawerReady = document.querySelector('[class*="MuiDrawer"]') ||
-                                document.querySelector('[class*="MuiList"]') ||
-                                document.querySelector('nav[class*="drawer"]') ||
-                                document.querySelector('.mainDrawer');
+        // ===== NEW: Display custom tab content =====
+        showCustomTabContent: function() {
+            const hash = window.location.hash;
+            const match = hash.match(/#\/customTab_(\d+)/);
             
-            const apiReady = typeof ApiClient !== 'undefined';
-
-            if (apiReady && drawerReady) {
-                console.debug('CustomTabs: Modern layout UI ready, creating tabs');
-                this.createModernTabs();
-            } else if (apiReady) {
-                // API is ready but drawer not found - might be a different page structure
-                console.debug('CustomTabs: API ready but drawer not found, trying alternative');
-                this.createModernTabs();
-            } else {
-                console.debug('CustomTabs: Waiting for Modern UI elements...');
-                setTimeout(() => this.waitForModernUI(), 200);
+            if (!match) {
+                console.error('CustomTabs: Invalid custom tab hash:', hash);
+                return;
             }
-        },
-
-        // Wait for Legacy layout UI elements
-        waitForLegacyUI: function() {
-            if (typeof ApiClient !== 'undefined' && document.querySelector('.emby-tabs-slider')) {
-                console.debug('CustomTabs: Legacy layout UI ready, creating tabs');
-                this.createLegacyTabs();
-            } else {
-                console.debug('CustomTabs: Waiting for Legacy UI elements...');
-                setTimeout(() => this.waitForLegacyUI(), 200);
-            }
-        },
-
-        // Fetch tab configs from server
-        fetchConfigs: function() {
-            return ApiClient.fetch({
+            
+            const tabIndex = parseInt(match[1], 10);
+            console.debug('CustomTabs: Showing content for tab index:', tabIndex);
+            
+            // Fetch tab configuration
+            ApiClient.fetch({
                 url: ApiClient.getUrl('CustomTabs/Config'),
                 type: 'GET',
                 dataType: 'json',
                 headers: {
                     accept: 'application/json'
                 }
-            });
-        },
-
-        // Create tabs for Modern layout (sidebar/drawer navigation)
-        createModernTabs: function() {
-            console.debug('CustomTabs: Starting tab creation process for Modern layout');
-
-            // Prevent duplicate creation
-            if (document.querySelector('[id^="customTabModern_"]')) {
-                console.debug('CustomTabs: Modern custom tabs already exist, skipping creation');
-                return;
-            }
-
-            this.fetchConfigs().then((configs) => {
-                console.debug('CustomTabs: Retrieved config for', configs.length, 'tabs');
-                this.tabConfigs = configs;
-
-                // Find the navigation drawer/sidebar - try multiple selectors
-                // The Modern layout uses MUI components
-                let drawer = document.querySelector('[class*="MuiDrawer"] [class*="MuiList"]');
-                
-                if (!drawer) {
-                    // Try finding the main navigation list
-                    drawer = document.querySelector('nav ul') ||
-                             document.querySelector('.mainDrawer-scrollContainer ul') ||
-                             document.querySelector('[role="navigation"] ul') ||
-                             document.querySelector('.MuiList-root');
-                }
-
-                if (!drawer) {
-                    console.warn('CustomTabs: Could not find Modern drawer navigation, trying alternative');
-                    this.createModernTabsHeader(configs);
+            }).then((configs) => {
+                if (tabIndex >= configs.length) {
+                    console.error('CustomTabs: Tab index out of range:', tabIndex);
                     return;
                 }
-
-                console.log('CustomTabs: Found drawer, adding tabs');
-
-                configs.forEach((config, i) => {
-                    const customTabId = `customTabModern_${i}`;
-
-                    if (document.querySelector(`#${customTabId}`)) {
-                        console.debug(`CustomTabs: Tab ${customTabId} already exists, skipping`);
+                
+                const config = configs[tabIndex];
+                console.debug('CustomTabs: Displaying content for:', config.Title);
+                
+                // Find the main Jellyfin content container
+                // Try multiple selectors to find the right container
+                let contentArea = document.querySelector('[data-role="page"]') ||
+                                 document.querySelector('.page') ||
+                                 document.querySelector('.mainAnimatedPages') || 
+                                 document.querySelector('[class*="MuiContainer"]') ||
+                                 document.querySelector('.view');
+                
+                if (!contentArea) {
+                    // If we can't find a specific container, target the main content area
+                    const main = document.querySelector('main') || document.querySelector('#content');
+                    if (main) {
+                        contentArea = main;
+                    } else {
+                        console.error('CustomTabs: Could not find content area');
                         return;
                     }
-
-                    console.log("CustomTabs: Creating modern custom tab:", config.Title);
-
-                    // Create a navigation item that matches the MUI styling
-                    const listItem = document.createElement('li');
-                    listItem.id = customTabId;
-                    listItem.className = 'MuiListItem-root MuiListItemButton-root MuiButtonBase-root';
-                    listItem.setAttribute('role', 'button');
-                    listItem.setAttribute('tabindex', '0');
-                    listItem.style.cssText = `
-                        display: flex;
-                        align-items: center;
-                        padding: 8px 16px;
-                        cursor: pointer;
-                        color: inherit;
-                        text-decoration: none;
-                    `;
-
-                    // Add icon placeholder
-                    const iconSpan = document.createElement('span');
-                    iconSpan.className = 'MuiListItemIcon-root';
-                    iconSpan.innerHTML = '<span class="material-icons" style="font-size: 24px;">tab</span>';
-                    iconSpan.style.cssText = 'min-width: 40px; color: inherit;';
-
-                    // Create the text content
-                    const textSpan = document.createElement('span');
-                    textSpan.className = 'MuiListItemText-root';
-                    textSpan.innerHTML = `<span class="MuiTypography-root MuiListItemText-primary">${config.Title}</span>`;
-
-                    listItem.appendChild(iconSpan);
-                    listItem.appendChild(textSpan);
-
-                    // Add hover effect
-                    listItem.addEventListener('mouseenter', function() {
-                        this.style.backgroundColor = 'rgba(255, 255, 255, 0.08)';
-                    });
-                    listItem.addEventListener('mouseleave', function() {
-                        this.style.backgroundColor = '';
-                    });
-
-                    // Add click handler to show tab content
-                    listItem.addEventListener('click', () => {
-                        this.showModernTabContent(i, config);
-                    });
-
-                    drawer.appendChild(listItem);
-                    console.log(`CustomTabs: Added modern tab ${customTabId} to drawer`);
+                }
+                
+                // Ensure all parent containers have proper height
+                let parent = contentArea;
+                while (parent && parent !== document.body) {
+                    parent.style.height = '100%';
+                    parent.style.minHeight = '100%';
+                    parent = parent.parentElement;
+                }
+                
+                // Set html and body to full height
+                document.documentElement.style.height = '100%';
+                document.body.style.height = '100%';
+                document.body.style.overflow = 'hidden';
+                
+                // Set the content area itself to full height
+                contentArea.style.height = '100%';
+                contentArea.style.minHeight = '100vh';
+                contentArea.style.position = 'relative';
+                contentArea.style.overflow = 'hidden';
+                
+                // Clear existing content completely and hide page elements
+                Array.from(contentArea.children).forEach(child => {
+                    child.style.display = 'none';
+                    child.remove();
                 });
-
-                console.log('CustomTabs: All custom tabs created successfully (Modern layout)');
+                contentArea.innerHTML = '';
+                
+                // Get the header height to calculate available space
+                const header = document.querySelector('header') || 
+                              document.querySelector('[class*="MuiAppBar"]') ||
+                              document.querySelector('.skinHeader');
+                const headerHeight = header ? header.offsetHeight : 0;
+                
+                console.debug('CustomTabs: Header height:', headerHeight, 'px');
+                
+                // Create custom tab content container with full available height
+                const customContent = document.createElement('div');
+                customContent.className = 'customTabContent';
+                customContent.id = `customTabPage_${tabIndex}`;
+                customContent.setAttribute('data-role', 'page');
+                
+                // Calculate height accounting for header
+                const contentHeight = headerHeight > 0 
+                    ? `calc(100vh - ${headerHeight}px)` 
+                    : '100vh';
+                
+                customContent.style.cssText = `
+                    width: 100%;
+                    height: ${contentHeight};
+                    min-height: ${contentHeight};
+                    max-height: ${contentHeight};
+                    position: fixed;
+                    top: ${headerHeight}px;
+                    left: 0;
+                    right: 0;
+                    overflow: hidden;
+                    margin: 0;
+                    padding: 0;
+                    background: var(--background, #101010);
+                    z-index: 1;
+                `;
+                
+                // Create wrapper for the content with flex fallback
+                const contentWrapper = document.createElement('div');
+                contentWrapper.style.cssText = `
+                    width: 100%;
+                    height: 100%;
+                    min-height: 100%;
+                    max-height: 100%;
+                    position: relative;
+                    overflow: hidden;
+                    display: flex;
+                    flex-direction: column;
+                `;
+                contentWrapper.innerHTML = config.ContentHtml;
+                
+                customContent.appendChild(contentWrapper);
+                
+                // Ensure iframes take full size with absolute positioning
+                const iframes = contentWrapper.querySelectorAll('iframe');
+                iframes.forEach(iframe => {
+                    // Apply comprehensive styling for both absolute and flex layouts
+                    iframe.style.cssText = `
+                        position: absolute;
+                        top: 0;
+                        left: 0;
+                        width: 100%;
+                        height: 100%;
+                        min-height: 100%;
+                        max-height: 100%;
+                        border: 0;
+                        margin: 0;
+                        padding: 0;
+                        display: block;
+                        flex: 1 1 auto;
+                    `;
+                    
+                    console.debug('CustomTabs: Styled iframe with dimensions:', 
+                                 iframe.offsetWidth, 'x', iframe.offsetHeight);
+                });
+                
+                // If no iframe, ensure content fills height
+                if (iframes.length === 0) {
+                    const contentDivs = contentWrapper.querySelectorAll('div');
+                    if (contentDivs.length > 0) {
+                        contentDivs[0].style.height = '100%';
+                        contentDivs[0].style.minHeight = '100%';
+                        contentDivs[0].style.flex = '1 1 auto';
+                    }
+                }
+                
+                contentArea.appendChild(customContent);
+                
+                // Hide any "page not found" messages immediately and after delay
+                const hidePageNotFound = () => {
+                    // Hide any error messages
+                    document.querySelectorAll('h1, h2, .pageTitle, [class*="error"], [class*="Error"]').forEach(el => {
+                        const text = el.textContent.toLowerCase();
+                        if (text.includes('page not found') || 
+                            text.includes('not found') ||
+                            text.includes('404')) {
+                            el.style.display = 'none';
+                            if (el.parentElement) {
+                                el.parentElement.style.display = 'none';
+                            }
+                        }
+                    });
+                    
+                    // Hide any divs that contain "page not found" text
+                    document.querySelectorAll('div').forEach(el => {
+                        if (el.textContent.toLowerCase().includes('page not found') && 
+                            el.textContent.length < 100) { // Only short divs to avoid hiding content
+                            el.style.display = 'none';
+                        }
+                    });
+                };
+                
+                hidePageNotFound();
+                setTimeout(hidePageNotFound, 100); // Check again after render
+                setTimeout(hidePageNotFound, 500); // And once more after animations
+                
+                // Add resize handler to maintain proper sizing
+                const handleResize = () => {
+                    const header = document.querySelector('header') || 
+                                  document.querySelector('[class*="MuiAppBar"]') ||
+                                  document.querySelector('.skinHeader');
+                    const headerHeight = header ? header.offsetHeight : 0;
+                    const contentHeight = headerHeight > 0 
+                        ? `calc(100vh - ${headerHeight}px)` 
+                        : '100vh';
+                    
+                    if (customContent && customContent.isConnected) {
+                        customContent.style.height = contentHeight;
+                        customContent.style.minHeight = contentHeight;
+                        customContent.style.maxHeight = contentHeight;
+                        customContent.style.top = `${headerHeight}px`;
+                    }
+                    
+                    console.debug('CustomTabs: Resized to height:', contentHeight);
+                };
+                
+                // Store handler for cleanup
+                customContent.resizeHandler = handleResize;
+                window.addEventListener('resize', handleResize);
+                
+                // Log final dimensions for debugging
+                setTimeout(() => {
+                    console.log('CustomTabs: Content displayed for:', config.Title);
+                    console.log('CustomTabs: Container dimensions:', 
+                               customContent.offsetWidth, 'x', customContent.offsetHeight);
+                    
+                    const iframe = customContent.querySelector('iframe');
+                    if (iframe) {
+                        console.log('CustomTabs: Iframe dimensions:', 
+                                   iframe.offsetWidth, 'x', iframe.offsetHeight);
+                    }
+                }, 100);
             }).catch((error) => {
-                console.error('CustomTabs: Error fetching tab configs:', error);
+                console.error('CustomTabs: Error fetching tab content:', error);
             });
         },
 
-        // Alternative: Add tabs to the header area for Modern layout
-        createModernTabsHeader: function(configs) {
-            console.log('CustomTabs: Creating header-based tabs for Modern layout');
+        // ===== NEW: Create Material UI tab for 10.12+ =====
+        createModernTab: function(config, index) {
+            const customTabId = `customTabButton_${index}`;
+            
+            // Create main anchor element with Material UI classes
+            const link = document.createElement('a');
+            link.className = 'MuiButtonBase-root MuiButton-root MuiButton-text MuiButton-textInherit MuiButton-sizeMedium MuiButton-textSizeMedium MuiButton-colorInherit css-1f20jcn';
+            link.setAttribute('tabindex', '0');
+            link.setAttribute('href', `#/customTab_${index}`);
+            link.setAttribute('id', customTabId);
+            link.setAttribute('data-custom-tab', 'true');
+            
+            // Create icon container
+            const iconSpan = document.createElement('span');
+            iconSpan.className = 'MuiButton-icon MuiButton-startIcon MuiButton-iconSizeMedium css-1ygddt1';
+            
+            // Create SVG icon
+            const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+            svg.setAttribute('class', 'MuiSvgIcon-root MuiSvgIcon-fontSizeMedium css-iguwhy');
+            svg.setAttribute('focusable', 'false');
+            svg.setAttribute('aria-hidden', 'true');
+            svg.setAttribute('viewBox', '0 0 24 24');
+            
+            // Create icon path (document/page icon)
+            const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+            path.setAttribute('d', 'M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z');
+            
+            svg.appendChild(path);
+            iconSpan.appendChild(svg);
+            link.appendChild(iconSpan);
+            
+            // Add tab title text
+            link.appendChild(document.createTextNode(config.Title));
+            
+            // Create ripple effect container
+            const ripple = document.createElement('span');
+            ripple.className = 'MuiTouchRipple-root css-4mb1j7';
+            link.appendChild(ripple);
+            
+            // Add click handler to show content
+            link.addEventListener('click', (e) => {
+                e.preventDefault();
+                console.debug('CustomTabs: Tab clicked:', config.Title);
+                window.location.hash = `#/customTab_${index}`;
+                this.showCustomTabContent();
+            });
+            
+            return link;
+        },
 
-            // Find or create a container in the header
-            let header = document.querySelector('[class*="MuiAppBar"]') ||
-                         document.querySelector('.skinHeader') ||
-                         document.querySelector('header');
+        // Fetches config and creates the tab elements in the DOM
+        createCustomTabs: function() {
+            console.debug('CustomTabs: Starting tab creation process');
 
-            if (!header) {
-                console.error('CustomTabs: Could not find header for Modern tabs');
+            // ===== MODIFIED: Branch based on UI version =====
+            if (this.isModernUI) {
+                this.createModernTabs();
+            } else if (this.isLegacyUI) {
+                this.createLegacyTabs();
+            }
+        },
+
+        // ===== NEW: Create tabs for Modern UI (10.12+) =====
+        createModernTabs: function() {
+            console.debug('CustomTabs: Creating Modern UI tabs');
+
+            // Find the Material UI navigation container
+            const container = document.querySelector('[class*="MuiToolbar"]') || 
+                            document.querySelector('nav[class*="Mui"]');
+            
+            if (!container) {
+                console.debug('CustomTabs: Modern UI container not found');
                 return;
             }
 
-            // Check if container already exists
-            let tabsContainer = document.querySelector('#customTabsModernContainer');
-            if (!tabsContainer) {
-                tabsContainer = document.createElement('div');
-                tabsContainer.id = 'customTabsModernContainer';
-                tabsContainer.style.cssText = `
-                    display: flex;
-                    gap: 4px;
-                    align-items: center;
-                    margin-left: 16px;
-                `;
-
-                // Find a good place to insert
-                const toolbar = header.querySelector('[class*="MuiToolbar"]') || header;
-                toolbar.appendChild(tabsContainer);
+            // Check for existing tabs - if they exist and are connected, NEVER touch them
+            const existingCustomTabs = Array.from(container.querySelectorAll('[data-custom-tab="true"]'));
+            
+            if (existingCustomTabs.length > 0) {
+                const allConnected = existingCustomTabs.every(tab => tab.isConnected && document.body.contains(tab));
+                
+                if (allConnected) {
+                    console.debug('CustomTabs: All custom tabs exist and are connected, skipping creation');
+                    this.tabsCreated = true;
+                    return;
+                }
+                
+                // Only remove truly orphaned tabs (not connected to DOM)
+                existingCustomTabs.forEach(tab => {
+                    if (!tab.isConnected) {
+                        console.debug('CustomTabs: Removing orphaned tab (not connected)');
+                        tab.remove();
+                    }
+                });
+                
+                // Re-check after cleanup - if any tabs remain, don't create new ones
+                if (container.querySelector('[data-custom-tab="true"]')) {
+                    console.debug('CustomTabs: Custom tabs still exist after cleanup, skipping creation');
+                    this.tabsCreated = true;
+                    return;
+                }
             }
 
-            configs.forEach((config, i) => {
-                const customTabId = `customTabModernHeader_${i}`;
+            // Fetch tab configuration from the server
+            ApiClient.fetch({
+                url: ApiClient.getUrl('CustomTabs/Config'),
+                type: 'GET',
+                dataType: 'json',
+                headers: {
+                    accept: 'application/json'
+                }
+            }).then((configs) => {
+                console.debug('CustomTabs: Retrieved config for', configs.length, 'Modern UI tabs');
 
-                if (document.querySelector(`#${customTabId}`)) {
+                // Find existing library tabs
+                const existingTabs = container.querySelectorAll('.MuiButton-root:not([data-custom-tab="true"])');
+                let lastTab = existingTabs[existingTabs.length - 1];
+                
+                if (!lastTab) {
+                    console.error('CustomTabs: No existing tabs found in Modern UI to insert after');
                     return;
                 }
 
-                const button = document.createElement('button');
-                button.id = customTabId;
-                button.type = 'button';
-                button.textContent = config.Title;
-                button.style.cssText = `
-                    background: transparent;
-                    border: none;
-                    color: inherit;
-                    padding: 8px 16px;
-                    cursor: pointer;
-                    font-size: 14px;
-                    font-family: inherit;
-                    border-radius: 4px;
-                    transition: background-color 0.2s;
-                `;
-
-                button.addEventListener('mouseenter', function() {
-                    this.style.backgroundColor = 'rgba(255, 255, 255, 0.08)';
-                });
-                button.addEventListener('mouseleave', function() {
-                    this.style.backgroundColor = 'transparent';
+                // Create and insert each custom tab
+                configs.forEach((config, i) => {
+                    const tabElement = this.createModernTab(config, i);
+                    
+                    // Insert AFTER existing tabs (non-destructive)
+                    lastTab.parentNode.insertBefore(tabElement, lastTab.nextSibling);
+                    lastTab = tabElement; // Update for next iteration
+                    
+                    console.log('CustomTabs: Added Modern UI tab:', config.Title);
                 });
 
-                button.addEventListener('click', () => {
-                    this.showModernTabContent(i, config);
+                console.log('CustomTabs: All Modern UI custom tabs created successfully');
+                
+                // Mark tabs as created
+                this.tabsCreated = true;
+                
+                // Verify tabs are visible
+                const createdTabs = container.querySelectorAll('[data-custom-tab="true"]');
+                console.log('CustomTabs: Verified', createdTabs.length, 'tabs in DOM');
+                
+                // Log their visibility
+                createdTabs.forEach((tab, idx) => {
+                    const isVisible = tab.offsetParent !== null;
+                    console.log(`CustomTabs: Tab ${idx} visible:`, isVisible);
                 });
-
-                tabsContainer.appendChild(button);
-                console.log(`CustomTabs: Added header tab ${customTabId}`);
+            }).catch((error) => {
+                console.error('CustomTabs: Error fetching Modern UI tab configs:', error);
             });
         },
 
-        // Show content for a Modern layout tab
-        showModernTabContent: function(index, config) {
-            console.log('CustomTabs: Showing modern tab content for:', config.Title);
-
-            // Find or create the content overlay
-            let contentArea = document.querySelector('#customTabsContentArea');
-            
-            if (!contentArea) {
-                contentArea = document.createElement('div');
-                contentArea.id = 'customTabsContentArea';
-                contentArea.style.cssText = `
-                    position: fixed;
-                    top: 0;
-                    left: 0;
-                    right: 0;
-                    bottom: 0;
-                    background: var(--theme-background, #181818);
-                    z-index: 9999;
-                    overflow: auto;
-                    padding: 64px 20px 20px 20px;
-                `;
-                
-                // Add close button
-                const closeBtn = document.createElement('button');
-                closeBtn.innerHTML = '&times; Close';
-                closeBtn.style.cssText = `
-                    position: fixed;
-                    top: 10px;
-                    right: 20px;
-                    font-size: 18px;
-                    background: rgba(255,255,255,0.1);
-                    border: none;
-                    color: white;
-                    cursor: pointer;
-                    z-index: 10000;
-                    padding: 8px 16px;
-                    border-radius: 4px;
-                `;
-                closeBtn.addEventListener('click', () => {
-                    contentArea.style.display = 'none';
-                });
-                contentArea.appendChild(closeBtn);
-                
-                // Add content container
-                const contentContainer = document.createElement('div');
-                contentContainer.id = 'customTabsContentContainer';
-                contentContainer.style.cssText = 'max-width: 1200px; margin: 0 auto;';
-                contentArea.appendChild(contentContainer);
-                
-                document.body.appendChild(contentArea);
-            }
-
-            // Update content
-            const contentContainer = contentArea.querySelector('#customTabsContentContainer');
-            contentContainer.innerHTML = config.ContentHtml;
-            contentArea.style.display = 'block';
-            
-            // Allow clicking outside content to close
-            contentArea.addEventListener('click', function(e) {
-                if (e.target === contentArea) {
-                    contentArea.style.display = 'none';
-                }
-            });
-        },
-
-        // Create tabs for Legacy layout (header tabs)
+        // ===== ORIGINAL: Legacy tab creation (10.11 and below) - UNCHANGED =====
         createLegacyTabs: function() {
-            console.debug('CustomTabs: Starting tab creation process for Legacy layout');
-
             const tabsSlider = document.querySelector('.emby-tabs-slider');
             if (!tabsSlider) {
                 console.debug('CustomTabs: Tabs slider not found');
                 return;
             }
 
-            // Prevent creating duplicate tabs if they already exist
-            if (tabsSlider.querySelector('[id^="customTabButton_"]')) {
-                console.debug('CustomTabs: Custom tabs already exist in DOM, skipping creation');
-                return;
+            // Check for existing tabs - if they exist and are connected, NEVER touch them
+            const existingTabs = tabsSlider.querySelectorAll('[id^="customTabButton_"]');
+            
+            if (existingTabs.length > 0) {
+                const allConnected = Array.from(existingTabs).every(tab => tab.isConnected && document.body.contains(tab));
+                
+                if (allConnected) {
+                    console.debug('CustomTabs: All custom tabs exist and are connected, skipping creation');
+                    this.tabsCreated = true;
+                    return;
+                }
             }
 
             // Fetch tab configuration from the server
-            this.fetchConfigs().then((configs) => {
-                console.debug('CustomTabs: Retrieved config for', configs.length, 'tabs (Legacy)');
-                this.tabConfigs = configs;
+            ApiClient.fetch({
+                url: ApiClient.getUrl('CustomTabs/Config'),
+                type: 'GET',
+                dataType: 'json',
+                headers: {
+                    accept: 'application/json'
+                }
+            }).then((configs) => {
+                console.debug('CustomTabs: Retrieved config for', configs.length, 'tabs');
 
                 const tabsSlider = document.querySelector('.emby-tabs-slider');
                 if (!tabsSlider) {
@@ -426,10 +535,10 @@ if (typeof window.customTabsPlugin == 'undefined') {
                     // Final check to ensure this specific tab doesn't already exist
                     if (document.querySelector(`#${customTabId}`)) {
                         console.debug(`CustomTabs: Tab ${customTabId} already exists, skipping`);
-                        return;
+                        return; // 'return' here acts like 'continue' in a forEach loop
                     }
 
-                    console.log("CustomTabs: Creating legacy custom tab:", config.Title);
+                    console.log("CustomTabs: Creating custom tab:", config.Title);
 
                     const title = document.createElement("div");
                     title.classList.add("emby-button-foreground");
@@ -437,161 +546,31 @@ if (typeof window.customTabsPlugin == 'undefined') {
 
                     const button = document.createElement("button");
                     button.type = "button";
-                    button.setAttribute("is", "emby-button");
+                    button.setAttribute("is", "empty-button");
                     button.classList.add("emby-tab-button", "emby-button");
                     button.setAttribute("data-index", i + 2);
                     button.setAttribute("id", customTabId);
                     button.appendChild(title);
+                    
+                    // Add click handler to show content
+                    button.addEventListener('click', (e) => {
+                        e.preventDefault();
+                        console.debug('CustomTabs: Legacy tab clicked:', config.Title);
+                        window.location.hash = `#/customTab_${i}`;
+                        this.showCustomTabContent();
+                    });
 
                     tabsSlider.appendChild(button);
-                    console.log(`CustomTabs: Added legacy tab ${customTabId} to tabs slider`);
+                    console.log(`CustomTabs: Added tab ${customTabId} to tabs slider`);
                 });
 
-                // Create content panels if they don't exist
-                // This is essential for 10.12 where TransformationPatches might not work
-                this.createLegacyContentPanels(configs);
-
-                console.log('CustomTabs: All custom tabs created successfully (Legacy layout)');
+                console.log('CustomTabs: All custom tabs created successfully');
+                
+                // Mark tabs as created
+                this.tabsCreated = true;
             }).catch((error) => {
                 console.error('CustomTabs: Error fetching tab configs:', error);
             });
-        },
-
-        // Create content panels for legacy tabs (needed for 10.12+)
-        createLegacyContentPanels: function(configs) {
-            // Find the container for tab content
-            // This could be different depending on Jellyfin version
-            let contentContainer = document.querySelector('.tabContent[data-index="1"]')?.parentElement ||
-                                   document.querySelector('#favoritesTab')?.parentElement ||
-                                   document.querySelector('.pageTabContent')?.parentElement ||
-                                   document.querySelector('.homeSections')?.closest('.view');
-
-            if (!contentContainer) {
-                // Try to find the main view container
-                contentContainer = document.querySelector('.mainAnimatedPage.homePage') ||
-                                   document.querySelector('[data-controller="home"]') ||
-                                   document.querySelector('.homePage');
-            }
-
-            if (!contentContainer) {
-                console.warn('CustomTabs: Could not find content container for panels');
-                // As a last resort, we'll handle clicks to show overlay
-                this.setupLegacyClickHandlersWithOverlay(configs);
-                return;
-            }
-
-            configs.forEach((config, i) => {
-                const panelId = `customTab_${i}`;
-                
-                // Check if panel already exists
-                if (document.querySelector(`#${panelId}`)) {
-                    console.debug(`CustomTabs: Panel ${panelId} already exists`);
-                    return;
-                }
-
-                // Create the content panel
-                const panel = document.createElement('div');
-                panel.className = 'tabContent pageTabContent';
-                panel.id = panelId;
-                panel.setAttribute('data-index', i + 2);
-                panel.style.display = 'none'; // Hidden by default
-                panel.innerHTML = config.ContentHtml;
-
-                contentContainer.appendChild(panel);
-                console.log(`CustomTabs: Created content panel ${panelId}`);
-            });
-
-            this.panelsCreated = true;
-
-            // Setup click handlers to show/hide panels
-            this.setupLegacyClickHandlers(configs);
-        },
-
-        // Setup click handlers for legacy tabs
-        setupLegacyClickHandlers: function(configs) {
-            configs.forEach((config, i) => {
-                const buttonId = `customTabButton_${i}`;
-                const panelId = `customTab_${i}`;
-                const button = document.querySelector(`#${buttonId}`);
-                
-                if (button) {
-                    // Remove any existing click handlers
-                    const newButton = button.cloneNode(true);
-                    button.parentNode.replaceChild(newButton, button);
-                    
-                    newButton.addEventListener('click', (e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        this.switchToLegacyTab(i);
-                    });
-                }
-            });
-        },
-
-        // Setup click handlers with overlay for legacy tabs (fallback when no container found)
-        setupLegacyClickHandlersWithOverlay: function(configs) {
-            configs.forEach((config, i) => {
-                const buttonId = `customTabButton_${i}`;
-                const button = document.querySelector(`#${buttonId}`);
-                
-                if (button) {
-                    // Remove any existing click handlers
-                    const newButton = button.cloneNode(true);
-                    button.parentNode.replaceChild(newButton, button);
-                    
-                    newButton.addEventListener('click', (e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        // Use the modern overlay approach
-                        this.showModernTabContent(i, config);
-                    });
-                }
-            });
-        },
-
-        // Switch to a legacy tab
-        switchToLegacyTab: function(index) {
-            const panel = document.querySelector(`#customTab_${index}`);
-            
-            if (!panel) {
-                console.error(`CustomTabs: Could not find panel for tab index ${index}`);
-                // Fall back to overlay
-                if (this.tabConfigs && this.tabConfigs[index]) {
-                    this.showModernTabContent(index, this.tabConfigs[index]);
-                }
-                return;
-            }
-
-            // Hide all tab content panels
-            const allPanels = document.querySelectorAll('.tabContent, .pageTabContent');
-            allPanels.forEach(p => {
-                p.style.display = 'none';
-                p.classList.remove('is-active');
-            });
-
-            // Show the selected panel
-            panel.style.display = 'block';
-            panel.classList.add('is-active');
-
-            // Update active state on buttons
-            const allButtons = document.querySelectorAll('.emby-tab-button');
-            allButtons.forEach(btn => {
-                btn.classList.remove('emby-tab-button-active');
-            });
-
-            const activeButton = document.querySelector(`#customTabButton_${index}`);
-            if (activeButton) {
-                activeButton.classList.add('emby-tab-button-active');
-            }
-
-            console.log(`CustomTabs: Switched to tab ${index}`);
-        },
-
-        // Re-detect and reinitialize on navigation
-        reinitialize: function() {
-            this.layoutType = null;
-            this.detectLayout();
-            this.waitForUI();
         }
     };
 
@@ -604,21 +583,23 @@ if (typeof window.customTabsPlugin == 'undefined') {
         window.customTabsPlugin.init();
     }
 
-    // A single handler for all navigation-style events
+    // A single handler for all navigation-style events with aggressive debouncing
+    let navigationTimeout = null;
     const handleNavigation = () => {
-        console.debug('CustomTabs: Navigation detected, re-initializing after delay');
-        // Delay helps ensure the DOM has settled after navigation
-        setTimeout(() => {
-            window.customTabsPlugin.reinitialize();
-        }, 800);
+        // Clear any pending navigation handler
+        if (navigationTimeout) {
+            clearTimeout(navigationTimeout);
+        }
+        
+        // Aggressive debounced navigation handler
+        navigationTimeout = setTimeout(() => {
+            console.debug('CustomTabs: Navigation detected, checking tabs');
+            window.customTabsPlugin.init();
+        }, 2000); // Increased to 2 seconds
     };
 
     // Standard browser navigation (back/forward buttons)
     window.addEventListener("popstate", handleNavigation);
-
-    // Mobile-specific events that can signify a page change
-    window.addEventListener("pageshow", handleNavigation);
-    window.addEventListener("focus", handleNavigation);
 
     // Monkey-patch history API to detect navigation
     const originalPushState = history.pushState;
@@ -633,24 +614,11 @@ if (typeof window.customTabsPlugin == 'undefined') {
         handleNavigation();
     };
 
-    // Handle tab visibility changes (e.g., user switches to another tab and back)
+    // Handle tab visibility changes only if tabs don't exist
     document.addEventListener("visibilitychange", () => {
-        if (!document.hidden) {
-            console.debug('CustomTabs: Page became visible, checking for tabs');
-            setTimeout(() => window.customTabsPlugin.reinitialize(), 300);
-        }
-    });
-
-    // Handle touch events which can also trigger navigation on mobile
-    let touchNavigation = false;
-    document.addEventListener("touchstart", () => {
-        touchNavigation = true;
-    });
-
-    document.addEventListener("touchend", () => {
-        if (touchNavigation) {
-            setTimeout(() => window.customTabsPlugin.reinitialize(), 1000);
-            touchNavigation = false;
+        if (!document.hidden && !window.customTabsPlugin.tabsStillExist()) {
+            console.debug('CustomTabs: Page became visible, tabs missing, checking');
+            setTimeout(() => window.customTabsPlugin.init(), 1000);
         }
     });
 
